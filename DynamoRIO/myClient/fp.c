@@ -30,7 +30,6 @@
  */
 
 #include "dr_api.h"
-
 #include "../ext/include/drsyms.h"
 #include "../ext/include/hashtable.h"
 #include "../ext/include/drvector.h"
@@ -38,6 +37,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <math.h>
+#include <string.h>
 
 # define MAX_SYM_RESULT 256
 
@@ -58,7 +58,6 @@ file_t logOut;
 static int fp_count = 0;
 static void *count_mutex; /* for multithread support */
 static client_id_t client_id;
-static char process_path[MAXIMUM_PATH];
 static bool callgrind_log_created = false;
 static int thread_id_for_log = 0;
 
@@ -359,7 +358,9 @@ typedef void(*fHashmapProc)(const char* key, const void* datum);
 
 
 //////////////////////////////////HASHTABLE
-#define INITIAL_SIZE 100000
+// Making this too large appears to cause things to crash.
+#define INITIAL_SIZE 100
+//#define INITIAL_SIZE 100000
 //#define MAX_CHAIN_LENGTH (8)
 
 
@@ -776,7 +777,7 @@ DR_EXPORT void
 dr_init(client_id_t id)
 {
 
-printf("Started dr_init\n");
+    printf("Started dr_init\n");
 
     dr_register_exit_event(exit_event);
     dr_register_bb_event(bb_event);
@@ -787,6 +788,7 @@ printf("Started dr_init\n");
     if (drsym_init(0) != DRSYM_SUCCESS) {
         dr_log(NULL, LOG_ALL, 1, "WARNING: unable to initialize symbol translation\n");
     }
+    
 #endif
 
 htinit();
@@ -798,10 +800,9 @@ exit_event(void)
 {
 #ifdef SHOW_RESULTS
     char msg[512];
-    int len;
-    len = dr_snprintf(msg, sizeof(msg)/sizeof(msg[0]),
+    int len = dr_snprintf(msg, sizeof(msg),
                       "Instrumentation results:\n"
-                      "Processed %d  instructions\n"
+                      "Processed %d instructions\n"
                       ,fp_count);
     DR_ASSERT(len > 0);
     NULL_TERMINATE(msg);
@@ -815,12 +816,16 @@ exit_event(void)
         dr_log(NULL, LOG_ALL, 1, "WARNING: error cleaning up symbol library\n");
     }
 #endif
+    if(!callgrind_log_created){
+	writeCallgrind(thread_id_for_log);
+	callgrind_log_created = true;
+    }
+
+
 printht();
 
 
 }
-
-
 
 void
 writeLog(void* drcontext){
@@ -854,80 +859,17 @@ writeLog(void* drcontext){
 
 
 static void
-print_address(app_pc addr, int bits, double loss, double lossD)
+print_address(inner_hash_entry *inVal, int bits, double loss, double lossD)
 {
-
-    const char* prefix = "PRINT ADDRESS: ";
-    drsym_error_t symres;
-    drsym_info_t *sym;
-    char sbuf[sizeof(*sym) + MAX_SYM_RESULT];
-    module_data_t *data;
-    data = dr_lookup_module(addr);
-    if (data == NULL) {
-       // dr_fprintf(logF, "%s data is null "PFX" \n", prefix, addr);
-        return;
-    }
-    snprintf(process_path, MAXIMUM_PATH,"%s",data->full_path);
-
-
-    if(!callgrind_log_created){
-	writeCallgrind(thread_id_for_log);
-	callgrind_log_created = true;
-    }
-
-    sym = (drsym_info_t *) sbuf;
-    sym->struct_size = sizeof(*sym);
-    sym->name_size = MAX_SYM_RESULT;   
-
-    symres = drsym_lookup_address(data->full_path, addr - data->start, sym,
-                           DRSYM_DEFAULT_FLAGS);
-
-
-    if (symres == DRSYM_SUCCESS || symres == DRSYM_ERROR_LINE_NOT_AVAILABLE) {
-        const char *modname = dr_module_preferred_name(data);
-        if (modname == NULL)
-            modname = "<noname>";
-        //dr_fprintf(logF, "%s "PFX" %s, function name is: %s, "PIFX", line off "PFX" \n", prefix, addr,
-                   //modname, sym->name, addr - data->start - sym->start_offs, sym->line_offs);
-
-
-	char key_string[KEY_MAX_LENGTH];
-	snprintf(key_string, KEY_MAX_LENGTH, "%s", sym->name);
-
-	outer_hash_entry* value;
-	if(hashmapGet(functionmap, key_string) == 0){
-		value = malloc(sizeof(outer_hash_entry));
-		value->mapAddrs = hashmap_new();
-		snprintf(value->function_name, KEY_MAX_LENGTH, "%s", sym->name);
-		snprintf(value->file, KEY_MAX_LENGTH, "%s", sym->file);
-		int error = hashmapSet(functionmap, value, value->function_name);
-		printf("Inserted success %s %d\n", value->function_name, error);
-	}
-	value = hashmapGet(functionmap, key_string);
-	inner_hash_entry* inVal;
-	int error;
-//	inVal = malloc(sizeof(inner_hash_entry));
-	error = hashmap_get(value->mapAddrs, addr, (void**)(&inVal));
-	if(error == MAP_MISSING){
-//		printf("Map missing case %x\n", addr);
-		//free(inVal);
-		inVal = malloc(sizeof(inner_hash_entry));
-		inVal->call_count = 0;
-		inVal->no_bits = 0;
-		inVal->line_number = sym->line;
-		if(!drvector_init(&inVal->lost_bits_vec, 10, false,NULL)){
-			printf("error in drvector_init bits for %s\n", key_string);	
-		}
-	}
-	inVal->addr = addr;        
-	inVal->call_count++;
-	printf("Inserting for %x with error code %d and count %d\n", addr, error, 	inVal->call_count);
+	++inVal->call_count;
 	if(inVal->no_bits < bits){
 		inVal->no_bits = bits;
 	}
+
 	if(inVal->loss < loss){
 		inVal->loss = loss;
 	}
+
 	vector_entry* ve = malloc(sizeof(vector_entry));
 	ve->bits = bits;
 	//ve->value = loss;
@@ -935,45 +877,14 @@ print_address(app_pc addr, int bits, double loss, double lossD)
 	if(!drvector_append(&inVal->lost_bits_vec, ve)){
 		printf("couldn't add to bits vector\n");
 	}
-        error = hashmap_put(value->mapAddrs, addr, inVal);
-        if(error != MAP_OK){printf("Error %d\n", error);}
-
-
-	if(hashmapGet(functionmap, key_string) == 0){
-		printf("Error, didn't insert\n");
-
-	}
-
-//add check for line not available
-       if (symres == DRSYM_ERROR_LINE_NOT_AVAILABLE) {
-           // dr_fprintf(logF, "%s Line is not available\n", prefix);
-        } else {
-           // dr_fprintf(logF, "Line number is  %s:%"UINT64_FORMAT_CODE" %d\n",
-                      // sym->file, sym->line, sym->line_offs);
-        }
-    } else
-      //  dr_fprintf(logF, "%s some error "PFX" \n", prefix, addr);
-  
-    dr_free_module_data(data);
 }
 
 
 void
 writeCallgrind(int thread_id){
 	char logname[MAXIMUM_PATH];
-	char *dirsep;
-    	int len;
-	char * tmp = process_path;
-
-	len = dr_snprintf(logname, sizeof(logname)/sizeof(logname[0]),
-                      "%s", tmp);
-
-	DR_ASSERT(len > 0);
-	for (dirsep = logname + len; *dirsep != '/'; dirsep--)
-        DR_ASSERT(dirsep > logname);
-    	len = dr_snprintf(dirsep + 1,
-                      (sizeof(logname) - (dirsep - logname))/sizeof(logname[0]),
-                      "callgrind.%d.out", thread_id);
+    	int len = dr_snprintf(logname, sizeof(logname), 
+            "callgrind.%d.out", thread_id);
     	DR_ASSERT(len > 0);
     	NULL_TERMINATE(logname);
     	logOut = dr_open_file(logname, 
@@ -1020,7 +931,7 @@ bool is_single_precision_instr(int opcode){
 
 
 static void 
-getRegReg(reg_id_t r1, reg_id_t r2, int opcode, app_pc addr){
+getRegReg(reg_id_t r1, reg_id_t r2, int opcode, inner_hash_entry *entry){
 	
 	const char * r1Name = get_register_name(r1);
 	const char * r2Name = get_register_name(r2);
@@ -1146,11 +1057,85 @@ getRegReg(reg_id_t r1, reg_id_t r2, int opcode, app_pc addr){
 		printf("op2 %.13lf mantissa %.13lf exp %d\n", op2, mant2, exp2);
 		*/
 	}
-	print_address(addr, bits, loss, lossD);
+	print_address(entry, bits, loss, lossD);
+}
+
+inner_hash_entry *get_inner_hash_entry(app_pc addr)
+{
+    char sbuf[sizeof(drsym_info_t) + MAX_SYM_RESULT];
+    module_data_t *data = dr_lookup_module(addr);
+    if (data == NULL) {
+       // dr_fprintf(logF, "%s data is null "PFX" \n", prefix, addr);
+        return;
+    }
+
+    drsym_info_t *sym = (drsym_info_t *) sbuf;
+    sym->struct_size = sizeof(drsym_info_t);
+    sym->name_size = MAX_SYM_RESULT;   
+
+    drsym_error_t symres = drsym_lookup_address(data->full_path, 
+        addr - data->start, sym, DRSYM_DEFAULT_FLAGS);
+
+    if (symres == DRSYM_SUCCESS || symres == DRSYM_ERROR_LINE_NOT_AVAILABLE) {
+        const char *modname = dr_module_preferred_name(data);
+        if (modname == NULL)
+            modname = "<noname>";
+        //dr_fprintf(logF, "%s "PFX" %s, function name is: %s, "PIFX", line off "PFX" \n", prefix, addr,
+                   //modname, sym->name, addr - data->start - sym->start_offs, sym->line_offs);
+
+
+	char key_string[KEY_MAX_LENGTH];
+	dr_snprintf(key_string, KEY_MAX_LENGTH, "%s", sym->name);
+
+	outer_hash_entry* value;
+	if((value = hashmapGet(functionmap, key_string)) == 0){
+		value = malloc(sizeof(outer_hash_entry));
+		value->mapAddrs = hashmap_new();
+
+                // Attempting to access the file value if 
+                // symres == DRSYM_ERROR_LINE_NOT_AVAILABLE appears to cause
+                // a segmentation fault.
+
+                if (symres == DRSYM_ERROR_LINE_NOT_AVAILABLE)
+                  dr_snprintf(value->file, KEY_MAX_LENGTH, "%s", "<unknown file>");
+                else
+                  dr_snprintf(value->file, KEY_MAX_LENGTH, "%s", sym->file);
+
+                dr_snprintf(value->function_name, KEY_MAX_LENGTH, "%s", sym->name);
+		int error = hashmapSet(functionmap, value, value->function_name);
+		printf("Inserted success %s %d\n", value->function_name, error);
+	}
+	
+        inner_hash_entry* inVal;
+	int error = hashmap_get(value->mapAddrs, addr, (void**)(&inVal));
+	if(error == MAP_MISSING){
+		inVal = malloc(sizeof(inner_hash_entry));
+		inVal->call_count = 0;
+		inVal->no_bits = 0;
+		inVal->line_number = sym->line;
+		if(!drvector_init(&inVal->lost_bits_vec, 10, false,NULL)){
+			printf("error in drvector_init bits for %s\n", key_string);	
+		}
+	}
+	inVal->addr = addr;        
+
+        error = hashmap_put(value->mapAddrs, addr, inVal);
+        if(error != MAP_OK)
+          printf("Error %d\n", error);
+
+        return inVal;
+    }
+    else
+    {
+      printf("Failed to locate symbol\n");
+      return NULL;
+    }
+	
+    dr_free_module_data(data);
 }
 
 static void
-callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, app_pc addr){
+callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, inner_hash_entry *entry){
 	int r, s;
    	const char * destRegName = get_register_name(destReg);
    	int regId = atoi(destRegName + 3 * sizeof(char));
@@ -1311,9 +1296,8 @@ callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, app_pc ad
 		printf("op2 %.13lf mantissa %.13lf exp %d\n", op2, mant2, exp2);
 		*/
 	}
-	print_address(addr, bits, loss, lossD);
+	print_address(entry, bits, loss, lossD);
 }
-
 
 
 
@@ -1349,19 +1333,22 @@ bb_event(void* drcontext, void *tag, instrlist_t *bb, bool for_trace, bool trans
 //			dr_print_opnd(drcontext, logF, source2, "OPND2: ");
 			reg_id_t rd = opnd_get_reg(source2);
 			reg_id_t rs = opnd_get_reg_used(source1, 0);
+                        inner_hash_entry *entry = get_inner_hash_entry(instr_get_app_pc(instr));
+
 			dr_insert_clean_call(drcontext, bb, instr, 
 				(void*) callback, true, 5, 
 				OPND_CREATE_INTPTR(rs), OPND_CREATE_INTPTR(opnd_get_disp(source1)),
-				OPND_CREATE_INTPTR(rd), OPND_CREATE_INTPTR(opcode), OPND_CREATE_INTPTR(instr_get_app_pc(instr)));
+				OPND_CREATE_INTPTR(rd), OPND_CREATE_INTPTR(opcode), OPND_CREATE_INTPTR(entry));
 
 		}
 		else if(opnd_is_reg(source1) && opnd_is_reg(source2)){
 			reg_id_t reg1 = opnd_get_reg(source1);
 			reg_id_t reg2 = opnd_get_reg(source2);
+                        inner_hash_entry *entry = get_inner_hash_entry(instr_get_app_pc(instr));
 			dr_insert_clean_call(drcontext,bb,instr, (void*)getRegReg, 
 				true, 4, 
 				OPND_CREATE_INTPTR(reg1), OPND_CREATE_INTPTR(reg2)
-				,OPND_CREATE_INTPTR(opcode), OPND_CREATE_INTPTR(instr_get_app_pc(instr))
+				,OPND_CREATE_INTPTR(opcode), OPND_CREATE_INTPTR(entry)
 			); 
 		}
 		else{

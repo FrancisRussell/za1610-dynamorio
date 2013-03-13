@@ -49,6 +49,21 @@
 
 #define NULL_TERMINATE(buf) buf[(sizeof(buf)/sizeof(buf[0])) - 1] = '\0'
 
+// Work-around for broken calloc
+
+void *fixed_calloc(const size_t nmemb, const size_t element_size)
+{
+  const size_t size = nmemb * element_size;
+  void *const data = malloc(size);
+
+  if (data != NULL)
+    memset(data, 0, size);
+
+  return data;
+}
+
+#define calloc fixed_calloc
+
 static dr_emit_flags_t bb_event(void *drcontext, void *tag, instrlist_t *bb,
                                 bool for_trace, bool translating);
 static void exit_event(void);

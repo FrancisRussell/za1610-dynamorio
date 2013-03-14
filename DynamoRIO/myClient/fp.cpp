@@ -589,27 +589,7 @@ callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, inner_has
    	mcontext.flags = DR_MC_ALL;
    	mcontext.size = sizeof(dr_mcontext_t);
    	bool result = dr_get_mcontext(dr_get_current_drcontext(), &mcontext);
-
-	reg_t mem_reg;
-	if(reg == DR_REG_RAX)
-		mem_reg = mcontext.rax;
-	else if(reg == DR_REG_RBP)
-		mem_reg = mcontext.rbp;
-	else if(reg == DR_REG_RBX)
-		mem_reg = mcontext.rbx;
-	else if(reg == DR_REG_RCX)
-		mem_reg = mcontext.rcx;
-	else if(reg == DR_REG_RDI)
-		mem_reg = mcontext.rdi;
-	else if(reg == DR_REG_RDX)
-		mem_reg = mcontext.rdx;
-	else if(reg == DR_REG_RSI)
-		mem_reg = mcontext.rsi;
-	else if(reg == DR_REG_RSP)
-		mem_reg = mcontext.rsp;
-	else
-		mem_reg = 0;
-//deal with a null case, rip enum doesn't exist
+	reg_t mem_reg = reg_get_value(reg, &mcontext);
 
 	int bits = 0;
 	double loss = 0;

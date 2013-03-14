@@ -366,14 +366,22 @@ bool is_single_precision_instr(int opcode){
 		opcode == OP_divss || opcode == OP_sqrtss  || opcode == OP_rsqrtss);	
 }
 
+static int getMMRegisterID(const reg_id_t r)
+{
+  if (r >= DR_REG_START_YMM && r <= DR_REG_STOP_YMM)
+    return r - DR_REG_START_YMM;
+  
+  if (r >= DR_REG_START_XMM && r <= DR_REG_STOP_XMM)
+    return r - DR_REG_START_XMM;
+
+  DR_ASSERT_MSG(0, "Unable to determine ID of multimedia register");
+}
 
 static void 
 getRegReg(reg_id_t r1, reg_id_t r2, int opcode, inner_hash_entry *entry){
 	
-	const char * r1Name = get_register_name(r1);
-	const char * r2Name = get_register_name(r2);
-	int s1        = atoi(r1Name + 3 * sizeof(char));
-	int s2        = atoi(r2Name + 3 * sizeof(char));
+	const int s1        = getMMRegisterID(r1);
+	const int s2        = getMMRegisterID(r2);
 	dr_mcontext_t mcontext;
    	memset(&mcontext, 0, sizeof(dr_mcontext_t));
    	mcontext.flags = DR_MC_MULTIMEDIA;
@@ -575,8 +583,7 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
 static void
 callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, inner_hash_entry *entry){
 	int r, s;
-   	const char * destRegName = get_register_name(destReg);
-   	int regId = atoi(destRegName + 3 * sizeof(char));
+   	int regId = getMMRegisterID(destReg);
    	dr_mcontext_t mcontext;
    	memset(&mcontext, 0, sizeof(dr_mcontext_t));
    	mcontext.flags = DR_MC_ALL;

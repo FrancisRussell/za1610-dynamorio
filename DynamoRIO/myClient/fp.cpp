@@ -536,7 +536,6 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
                   value->file = std::string(sym->file);
 
                 value->function_name = std::string(sym->name);
-		printf("Inserted success %s\n", value->function_name.c_str());
 	}
         else
         {
@@ -553,6 +552,8 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
 	  inVal->line_number = sym->line;
 
           value->mapAddrs[addr] = inVal;
+          dr_printf("Instrumenting %s, function %s, line %d, pc %d\n", value->file.c_str(), 
+            value->function_name.c_str(), inVal->line_number, addr);
 	}
         else
         {

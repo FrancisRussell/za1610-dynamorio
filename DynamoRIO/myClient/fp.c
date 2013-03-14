@@ -838,6 +838,8 @@ exit_event(void)
 
 
 printht();
+dr_close_file(logOut);
+
 
 
 }
@@ -918,7 +920,6 @@ writeCallgrind(int thread_id){
        	dr_fprintf(logOut, "creator: callgrind-3.6.1-Debian\n");
        	dr_fprintf(logOut, "positions: instr line\n");
        	dr_fprintf(logOut, "events: Average Max\n\n\n");
-
 }
 
 

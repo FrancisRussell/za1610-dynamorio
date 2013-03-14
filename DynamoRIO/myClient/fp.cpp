@@ -31,13 +31,16 @@
 
 #include "dr_api.h"
 #include "../ext/include/drsyms.h"
-#include "../ext/include/hashtable.h"
-#include "../ext/include/drvector.h"
 
-#include <stdlib.h>
-#include <stdio.h>
-#include <math.h>
-#include <string.h>
+#include <cstdlib>
+#include <cstdio>
+#include <cmath>
+#include <cstring>
+#include <map>
+#include <vector>
+#include <string>
+#include <algorithm>
+#include <utility>
 
 # define MAX_SYM_RESULT 256
 
@@ -68,6 +71,8 @@ static dr_emit_flags_t bb_event(void *drcontext, void *tag, instrlist_t *bb,
                                 bool for_trace, bool translating);
 static void exit_event(void);
 
+static void writeCallgrind(int thread_id);
+
 file_t logF;
 file_t logOut;
 static int fp_count = 0;
@@ -76,626 +81,46 @@ static client_id_t client_id;
 static bool callgrind_log_created = false;
 static int thread_id_for_log = 0;
 
-
-
-
-////////////////////////ANOTHER HASH TABLE WITH STRING KEY
-
-typedef struct sHashmap hashmap;
-
-#define HASH_BITS 8
-#define HASHMAP_ILLEGAL 0   
-#define HASHMAP_INSERT 1    
-#define HASHMAP_UPDATE 2    
-typedef void(*fHashmapProc)(const char* key, const void* datum);
-
- /* *************************************************************** structures */
- 
- typedef struct
- {
-     char* key;  
-     void* data; 
- } hashmapEntry;
- 
- struct sHashmap
- {
-     hashmapEntry* array; 
-     size_t size,         
-            count;        
- };
- 
- /* ******************************************************** private functions */
- 
- static void rehash(hashmap* map);
- 
- static int insert(hashmap* map, void* data, char* key);
- 
- static hashmapEntry* find(const hashmap* map, const char* key);
- 
- static int compare(const hashmapEntry* lhs, const hashmapEntry* rhs);
- 
- static unsigned long hash1(const char* rawKey)
+typedef struct
 {
-     const unsigned char* s = (const unsigned char*) rawKey;
-     unsigned long hash = 0;
-     
-     do
-     {
-         hash = *s + (hash << 6) + (hash << 16) - hash;
-     }
-     while (*++s);
-     
-     return hash;
- }
- 
- static unsigned long hash2(const char* rawKey)
- {
-     const unsigned char* s = (const unsigned char*) rawKey;
-     unsigned long hash = 0;
-     
-     do
-     {
-         hash ^= (unsigned long) *s;
-         hash += (hash << 1) + (hash << 4) + (hash << 7) + (hash << 8) + (hash << 24);
-     }
-     while (*++s);
-     
-     return hash;
- }
- 
- static void rehash(hashmap* map)
- {
-     size_t size;
-     hashmapEntry* array = map->array;
-     
-     /* double the size of the array */
-     size = ++map->size;
-     map->size <<= 1;
-     map->array = (hashmapEntry*) calloc(sizeof(hashmapEntry), map->size);
-     --map->size;
-     map->count = 0;
-     
-     /* re-insert all elements */
-     do
-     {
-         --size;
-         if (array[size].key)
-             insert(map, array[size].data, array[size].key);
-     }
-     while (size);
-     
-     /* return unused memory */
-     free(array);
- }
- 
- static hashmapEntry* find(const hashmap* map, const char* key)
- {
-     unsigned long index, step, initialIndex;
-     hashmapEntry* freeEntry = 0;
-     
-     initialIndex = index = hash1(key) & map->size;
-     
-     /* first try */
-     if (map->array[index].key)
-     {
-         if (!strcmp(map->array[index].key, key))
-             return &map->array[index];
-     }
-     else if (!map->array[index].data)
-     {
-         return &map->array[index];
-     }
-     else
-     {
-         freeEntry = &map->array[index];
-     }
-     
-     /* collision */
-     step = (hash2(key) % map->size) + 1;
-     
-     do
-     {
-         index = (index + step) & map->size;
-         
-         if (map->array[index].key)
-         {
-             if (!strcmp(map->array[index].key, key))
-                 return &map->array[index];
-         }
-         else if (!map->array[index].data)
-         {
-             return (freeEntry) ? freeEntry : &map->array[index];
-         }
-         else if (!freeEntry)
-         {
-             freeEntry = &map->array[index];
-         }
-     }
-     while (index != initialIndex);
-     
-     return freeEntry;
- }
- 
- static int insert(hashmap* map, void* data, char* key)
- {
-     hashmapEntry* entry;
-     
-     if (map->size == map->count)
-         rehash(map);
-     
-     do
-     {
-         entry = find(map, key);
-         
-         if (entry)
-         {
-             entry->data = data;
-             
-             if (entry->key)
-             {
-                 /* updated the entry */
-                 free(key);
-                 return HASHMAP_UPDATE;
-             }
-             else
-             {
-                 /* inserted the entry */
-                 ++map->count;
-                 entry->key = key;
-                 return HASHMAP_INSERT;
-             }
-         }
-         
-         rehash(map);
-     }
-     while (1);
- }
- 
- static int compare(const hashmapEntry* lhs, const hashmapEntry* rhs)
- {
-     return (lhs->key)  ? (rhs->key) ? strcmp(lhs->key, rhs->key) : -1
-                        : (rhs->key) ? 1 : 0;
- }
- 
- /* ******************************************************* exported functions */
- 
- hashmap* newHashmap(unsigned int hint)
- {
-     hashmap* map = (hashmap*) malloc(sizeof(hashmap));
-    
-    if (hint < 4)
-     {
-         hint = 4;
-     }
-     else if (hint & (hint - 1))
-     {
-         unsigned int i = 1;
-         
-         do
-         {
-             hint |= (hint >> i);
-             i <<= 1;
-         }
-         while (i <= (sizeof(hint) << 2));
-         ++hint;
-     }
-     
-     map->array = (hashmapEntry*) calloc(sizeof(hashmapEntry), hint);
-     map->size = hint - 1;
-     map->count = 0;
-     
-     return map;
- }
- 
- void deleteHashmap(hashmap* map)
- {
-     unsigned long index = 0;
-     
-    // assert(map);
-     
-     do
-     {
-         if (map->array[index].key)
-             free(map->array[index].key);
-     }
-     while (++index <= map->size);
- 
-     free(map->array);
-     free(map);
- }
- 
- int hashmapSet(hashmap* map, void* data, const char* key)
- {
-     return (map && key && *key)  ? insert(map, data, strdup(key))
-                                  : HASHMAP_ILLEGAL;
- }
- 
- void* hashmapGet(const hashmap* map, const char* key)
- {
-     hashmapEntry* entry;
-     //assert(map && key && *key);
-     
-     entry = find(map, key);
-     
-     if (entry && entry->key)
-         return entry->data;
-     
-     return 0;
- }
- 
- void* hashmapRemove(hashmap* map, const char* key)
- {
-     void* res = 0;
-     hashmapEntry* entry;
-     
-     //assert(map && key && *key);
-     
-     entry = find(map, key);
-     
-     if (entry && entry->key)
-     {
-         --map->count;
-         
-         free(entry->key);
-         entry->key = 0;
-         res = entry->data;
-         
-         /* setting exist to one indicates that this entry was already in use */
-         entry->data = (void*) 1;
-     }
-     
-     return res;
- }
- 
- void hashmapProcess(const hashmap* map, fHashmapProc proc)
- {
-     hashmapEntry* array;
-     size_t size;
-     int i;
-     
-     //assert(map);
-     
-     size = map->size + 1;
-     array = (hashmapEntry*) malloc(sizeof(hashmapEntry) * size);
-   
-     memcpy(array, map->array, sizeof(hashmapEntry) * size);
-     qsort(array, size, sizeof(hashmapEntry),
-                 (int(*)(const void*, const void*)) compare);
-     
-     for (i = 0; i < map->count; ++i)
-         proc(array[i].key, array[i].data);
-     
-     free(array);
-}
-
-
-
-
-
-//////////////////////////////////HASHTABLE
-// Making this too large appears to cause things to crash.
-#define INITIAL_SIZE 100
-//#define INITIAL_SIZE 100000
-//#define MAX_CHAIN_LENGTH (8)
-
-
-#define MAP_MISSING -3  /* No such element */
-#define MAP_FULL -2 	/* Hashmap is full */
-#define MAP_OMEM -1 	/* Out of Memory */
-#define MAP_OK 0 	/* OK */
-typedef void *any_t;
-typedef int (*PFany)(any_t, any_t);
-typedef any_t map_t;
-
-// We need to keep keys and values
-typedef struct _hashmap_element{
-	int key;
-	int in_use;
-	any_t data;
-} hashmap_element;
-
-// A hashmap has some maximum size and current size,
-// as well as the data to hold.
-typedef struct _hashmap_map{
-	int table_size;
-	int size;
-	hashmap_element *data;
-} hashmap_map;
-
-
-
-
-unsigned int hashmap_hash_int(hashmap_map * m, unsigned int key){
-/* Robert Jenkins' 32 bit Mix Function */
-key += (key << 12);
-key ^= (key >> 22);
-key += (key << 4);
-key ^= (key >> 9);
-key += (key << 10);
-key ^= (key >> 2);
-key += (key << 7);
-key ^= (key >> 12);
-
-/* Knuth's Multiplicative Method */
-key = (key >> 3) * 2654435761;
-
-return key % m->table_size;
-}
-
-
-/*
- * Return an empty hashmap, or NULL on failure.
- */
-map_t hashmap_new() {
-	hashmap_map* m = (hashmap_map*) malloc(sizeof(hashmap_map));
-	if(!m) goto err;
-
-	m->data = (hashmap_element*) calloc(INITIAL_SIZE, sizeof(hashmap_element));
-	if(!m->data) goto err;
-	m->table_size = INITIAL_SIZE;
-	m->size = 0;
-
-	return m;
-	err:
-		if (m)
-			hashmap_free(m);
-		return NULL;
-}
-
-int hashmap_hash(map_t in, int key){
-	int curr;
-	int i;
-
-	/* Cast the hashmap */
-	hashmap_map* m = (hashmap_map *) in;
-
-	/* If full, return immediately */
-	if(m->size == m->table_size) return MAP_FULL;
-
-	/* Find the best index */
-	curr = hashmap_hash_int(m, key);
-
-	/* Linear probling */
-	for(i = 0; i< m->table_size; i++){
-		if(m->data[curr].in_use == 0)
-			return curr;
-
-		if(m->data[curr].key == key && m->data[curr].in_use == 1)
-			return curr;
-
-		curr = (curr + 1) % m->table_size;
-	}
-
-	return MAP_FULL;
-}
-
-/*
- * Doubles the size of the hashmap, and rehashes all the elements
- */
-int hashmap_rehash(map_t in){
-	int i;
-	int old_size;
-	hashmap_element* curr;
-
-	/* Setup the new elements */
-	hashmap_map *m = (hashmap_map *) in;
-	hashmap_element* temp = (hashmap_element *)
-		calloc(2 * m->table_size, sizeof(hashmap_element));
-	if(!temp) return MAP_OMEM;
-
-	/* Update the array */
-	curr = m->data;
-	m->data = temp;
-
-	/* Update the size */
-	old_size = m->table_size;
-	m->table_size = 2 * m->table_size;
-	m->size = 0;
-
-	/* Rehash the elements */
-	for(i = 0; i < old_size; i++){
-		int status = hashmap_put(m, curr[i].key, curr[i].data);
-		if (status != MAP_OK)
-			return status;
-	}
-
-	free(curr);
-
-	return MAP_OK;
-}
-
-/*
- * Add a pointer to the hashmap with some key
- */
-int hashmap_put(map_t in, int key, any_t value){
-	int index;
-	hashmap_map* m;
-
-	/* Cast the hashmap */
-	m = (hashmap_map *) in;
-
-
-
-	/* Find a place to put our value */
-	index = hashmap_hash(in, key);
-	while(index == MAP_FULL){
-		if (hashmap_rehash(in) == MAP_OMEM) {
-			return MAP_OMEM;
-		}
-		index = hashmap_hash(in, key);
-	}
-
-	/* Set the data */
-	m->data[index].data = value;
-	m->data[index].key = key;
-	m->data[index].in_use = 1;
-	m->size++; 
-
-
-	return MAP_OK;
-}
-
-/*
- * Get your pointer out of the hashmap with a key
- */
-int hashmap_get(map_t in, int key, any_t *arg){
-	int curr;
-	int i;
-	hashmap_map* m;
-
-	/* Cast the hashmap */
-	m = (hashmap_map *) in;
-
-	/* Find data location */
-	curr = hashmap_hash_int(m, key);
-
-	/* Linear probing, if necessary */
-	for(i = 0; i< m->table_size; i++){
-
-		if(m->data[curr].key == key && m->data[curr].in_use == 1){
-			*arg = (int *) (m->data[curr].data);
-			return MAP_OK;
-		}
-
-		curr = (curr + 1) % m->table_size;
-	}
-
-	*arg = NULL;
-
-	/* Not found */
-	return MAP_MISSING;
-}
-
-
-/*
- * Remove an element with that key from the map
- */
-int hashmap_remove(map_t in, int key){
-	int i;
-	int curr;
-	hashmap_map* m;
-
-	/* Cast the hashmap */
-	m = (hashmap_map *) in;
-
-	/* Find key */
-	curr = hashmap_hash_int(m, key);
-
-	/* Linear probing, if necessary */
-	for(i = 0; i< m->table_size; i++){
-		if(m->data[curr].key == key && m->data[curr].in_use == 1){
-			/* Blank out the fields */
-			m->data[curr].in_use = 0;
-			m->data[curr].data = NULL;
-			m->data[curr].key = 0;
-
-			/* Reduce the size */
-			m->size--;
-			return MAP_OK;
-		}
-		curr = (curr + 1) % m->table_size;
-	}
-
-
-	/* Data not found */
-	return MAP_MISSING;
-}
-
-/* Deallocate the hashmap */
-void hashmap_free(map_t in){
-	hashmap_map* m = (hashmap_map*) in;
-	free(m->data);
-	free(m);
-}
-
-/* Return the length of the hashmap */
-int hashmap_length(map_t in){
-	hashmap_map* m = (hashmap_map *) in;
-	if(m != NULL) return m->size;
-	else return 0;
-}
-
-
-#define KEY_MAX_LENGTH (256)
-//#define KEY_COUNT 10 
-/*
-typedef struct data_struct_s
-{
-    int key;
-    int number;
-} data_struct_t;
-*/
-
-static map_t mymap;
-
-static hashmap* functionmap;
-
-typedef struct 
-{
-   char function_name[KEY_MAX_LENGTH];
-   char file[KEY_MAX_LENGTH];
-   bool hash_created;
-   map_t mapAddrs;
-} outer_hash_entry;
+    int bits;
+//  double value;  
+    double dvalue; 
+} vector_entry;
 
 typedef struct
 {
-    int addr;  
+    app_pc addr;  
     int line_number;
     int call_count;
     int no_bits;
     double loss;  
-    drvector_t lost_bits_vec;
- 
+    std::vector<vector_entry> lost_bits_vec;
 } inner_hash_entry;
 
- typedef struct
+typedef struct 
 {
-    int bits;
-//    double value;  
-    double dvalue; 
-} vector_entry;
- 
+   std::string function_name;
+   std::string file;
+   bool hash_created;
+   std::map<app_pc, inner_hash_entry*> mapAddrs;
+} outer_hash_entry;
+
+static std::map<std::string, outer_hash_entry> functionmap;
+
 void htinit(){
- 	functionmap = newHashmap(10);	
 }
-
-int hashmap_it(map_t in, PFany f) {
-	int i;
-	any_t item = NULL;
-	/* Cast the hashmap */
-	hashmap_map* m = (hashmap_map*) in;
-
-	/* On empty hashmap, return immediately */
-	if (hashmap_length(m) <= 0)
-		return MAP_MISSING;	
-
-	/* Linear probing */
-	for(i = 0; i< m->table_size; i++)
-		if(m->data[i].in_use != 0) {
-			if(m->data[i].key != 0){
-		//	printf("inside iteration %d\n", m->data[i].key);
-			any_t data = (any_t) (m->data[i].data);
-			int status = f(item, data);
-			if (status != MAP_OK) {
-				return status;
-			}
-			}
-		}
-
-        return MAP_OK;
-}
-
 
 #define round(x) ((x)>=0?(long)((x)+0.5):(long)((x)-0.5))
 
-int printAddr(any_t t1, inner_hash_entry* entry){
+int printAddr(const std::pair<app_pc, inner_hash_entry*>& pair){
+        const inner_hash_entry* entry = pair.second;
 	int i;
-	vector_entry* ve;
+	const vector_entry* ve;
 	int num_of_bits = 0;
 	double loss = 0;
 	for(i = 0; i < entry->call_count; i++){
-		ve =  drvector_get_entry(&entry->lost_bits_vec, i);
+                ve = &entry->lost_bits_vec[i];
 		num_of_bits += ve->bits;
 		loss += fabs(ve->dvalue);
 //		printf("drvector bits %d %x %d %.13lf %.13lf\n",i, entry->addr, ve->bits, ve->value, fabs(ve->dvalue)); 
@@ -704,7 +129,7 @@ int printAddr(any_t t1, inner_hash_entry* entry){
 	double sumup = 0;
 	double sumdown = 0;        
 	for(i = 0; i < entry->call_count; i++){
-          ve =  drvector_get_entry(&entry->lost_bits_vec, i);
+          ve = &entry->lost_bits_vec[i];
 	  sumup += (fabs(ve->dvalue) - mean)*(fabs(ve->dvalue) - mean)*(fabs(ve->dvalue) - mean);	
 	  sumdown += (fabs(ve->dvalue) - mean)*(fabs(ve->dvalue) - mean);
 	}
@@ -720,10 +145,11 @@ return 0;
 }
 
 
-void printFunction(char* key, outer_hash_entry* entry){
+void printFunction(const std::pair<std::string, outer_hash_entry>& pair){
+        const outer_hash_entry *entry = &pair.second;
 //	printf("function name is %s and file %s\n", key, entry->file);
-	dr_fprintf(logOut, "fl=%s\nfn=%s\n",entry->file, entry->function_name);
-	hashmap_it(entry->mapAddrs, &printAddr);
+	dr_fprintf(logOut, "fl=%s\nfn=%s\n",entry->file.c_str(), entry->function_name.c_str());
+        std::for_each(entry->mapAddrs.begin(), entry->mapAddrs.end(), &printAddr);
 }
 
 //////////////HASHTABLE end
@@ -743,7 +169,7 @@ unsigned int sign: 1;
 };
 
 void printht(){
-	hashmapProcess(functionmap,&printFunction);
+        std::for_each(functionmap.begin(), functionmap.end(), &printFunction);
 /*
 	outer_hash_entry* entry = hashmapGet(functionmap, "main");
 	inner_hash_entry* inVal;
@@ -836,12 +262,8 @@ exit_event(void)
 	callgrind_log_created = true;
     }
 
-
-printht();
-dr_close_file(logOut);
-
-
-
+    printht();
+    dr_close_file(logOut);
 }
 
 void
@@ -872,6 +294,7 @@ writeLog(void* drcontext){
     	}
 	#endif	
 	thread_id_for_log = dr_get_thread_id(drcontext);
+        dr_close_file(logOut);
 }
 
 
@@ -887,13 +310,11 @@ print_address(inner_hash_entry *inVal, int bits, double loss, double lossD)
 		inVal->loss = loss;
 	}
 
-	vector_entry* ve = malloc(sizeof(vector_entry));
-	ve->bits = bits;
+	vector_entry ve;
+	ve.bits = bits;
 	//ve->value = loss;
-	ve->dvalue = lossD;
-	if(!drvector_append(&inVal->lost_bits_vec, ve)){
-		printf("couldn't add to bits vector\n");
-	}
+	ve.dvalue = lossD;
+        inVal->lost_bits_vec.push_back(ve);
 }
 
 
@@ -1082,7 +503,7 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
     module_data_t *data = dr_lookup_module(addr);
     if (data == NULL) {
        // dr_fprintf(logF, "%s data is null "PFX" \n", prefix, addr);
-        return;
+        return NULL;
     }
 
     drsym_info_t *sym = (drsym_info_t *) sbuf;
@@ -1100,45 +521,45 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
                    //modname, sym->name, addr - data->start - sym->start_offs, sym->line_offs);
 
 
-	char key_string[KEY_MAX_LENGTH];
-	dr_snprintf(key_string, KEY_MAX_LENGTH, "%s", sym->name);
+        std::string key(sym->name);
 
 	outer_hash_entry* value;
-	if((value = hashmapGet(functionmap, key_string)) == 0){
-		value = malloc(sizeof(outer_hash_entry));
-		value->mapAddrs = hashmap_new();
-
+        if (functionmap.find(key) == functionmap.end()) {
+		value = &functionmap[key];
                 // Attempting to access the file value if 
                 // symres == DRSYM_ERROR_LINE_NOT_AVAILABLE appears to cause
                 // a segmentation fault.
 
                 if (symres == DRSYM_ERROR_LINE_NOT_AVAILABLE)
-                  dr_snprintf(value->file, KEY_MAX_LENGTH, "%s", "<unknown file>");
+                  value->file = std::string("<unkown file>");
                 else
-                  dr_snprintf(value->file, KEY_MAX_LENGTH, "%s", sym->file);
+                  value->file = std::string(sym->file);
 
-                dr_snprintf(value->function_name, KEY_MAX_LENGTH, "%s", sym->name);
-		int error = hashmapSet(functionmap, value, value->function_name);
-		printf("Inserted success %s %d\n", value->function_name, error);
+                value->function_name = std::string(sym->name);
+		printf("Inserted success %s\n", value->function_name.c_str());
 	}
-	
+        else
+        {
+		value = &functionmap[key];
+        }
+
         inner_hash_entry* inVal;
-	int error = hashmap_get(value->mapAddrs, addr, (void**)(&inVal));
-	if(error == MAP_MISSING){
-		inVal = malloc(sizeof(inner_hash_entry));
-		inVal->call_count = 0;
-		inVal->no_bits = 0;
-		inVal->line_number = sym->line;
-		if(!drvector_init(&inVal->lost_bits_vec, 10, false,NULL)){
-			printf("error in drvector_init bits for %s\n", key_string);	
-		}
+        if (value->mapAddrs.find(addr) == value->mapAddrs.end())
+        {
+	
+          inVal = new inner_hash_entry();
+	  inVal->call_count = 0;
+	  inVal->no_bits = 0;
+	  inVal->line_number = sym->line;
+
+          value->mapAddrs[addr] = inVal;
 	}
+        else
+        {
+          inVal = value->mapAddrs[addr];
+        }
+
 	inVal->addr = addr;        
-
-        error = hashmap_put(value->mapAddrs, addr, inVal);
-        if(error != MAP_OK)
-          printf("Error %d\n", error);
-
         return inVal;
     }
     else
@@ -1146,7 +567,7 @@ inner_hash_entry *get_inner_hash_entry(app_pc addr)
       printf("Failed to locate symbol\n");
       return NULL;
     }
-	
+
     dr_free_module_data(data);
 }
 
@@ -1179,7 +600,7 @@ callback(reg_id_t reg, int displacement, reg_id_t destReg, int opcode, inner_has
 	else if(reg == DR_REG_RSP)
 		mem_reg = mcontext.rsp;
 	else
-		mem_reg = NULL;
+		mem_reg = 0;
 //deal with a null case, rip enum doesn't exist
 
 	int bits = 0;
